@@ -1,36 +1,38 @@
-import React, { useState, useEffect } from 'react';
+import { Ionicons } from '@expo/vector-icons';
+import DateTimePicker from '@react-native-community/datetimepicker';
+import { LinearGradient } from 'expo-linear-gradient';
+import { useRouter } from 'expo-router';
+import React, { useEffect, useState } from 'react';
 import {
-  StyleSheet,
-  View,
-  Text,
-  ScrollView,
-  TouchableOpacity,
+  ActivityIndicator,
   Alert,
   Platform,
-  ActivityIndicator,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  useColorScheme,
+  View,
 } from 'react-native';
-import { useColorScheme } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { LinearGradient } from 'expo-linear-gradient';
-import DateTimePicker from '@react-native-community/datetimepicker';
-import { useRouter } from 'expo-router';
-import { Colors } from '../../constants/Colors';
 import { busRoutesService } from '../../services/busRoutes';
+import { busService } from '../../services/busService';
+import { seatsService } from '../../services/seats';
 
 interface Route {
   id: string;
   origin: string;
   destination: string;
-  departure_time: string;
-  arrival: string;
+  departure_datetime: string;
+  arrival_datetime: string;
   price: number;
   bus_type: string;
   amenities: string[];
+  bus_id?: string;
 }
 
 interface SearchForm {
   selectedRoute: Route | null;
-  departureDate: Date;
+  departure_datetime: Date;
   returnDate?: Date;
   passengers: number;
   tripType: 'one-way' | 'round-trip';
@@ -41,12 +43,14 @@ export default function SearchScreen() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [routes, setRoutes] = useState<Route[]>([]);
-  const [showDepartureDatePicker, setShowDepartureDatePicker] = useState(false);
+  const [showdeparture_datetimePicker, setShowdeparture_datetimePicker] = useState(false);
   const [showReturnDatePicker, setShowReturnDatePicker] = useState(false);
+  const [availableSeatsMap, setAvailableSeatsMap] = useState<Record<string, number>>({});
+  const [busInfoMap, setBusInfoMap] = useState<Record<string, { model: string; plate: string; type?: string } | null>>({});
 
   const [searchForm, setSearchForm] = useState<SearchForm>({
     selectedRoute: null,
-    departureDate: new Date(),
+    departure_datetime: new Date(),
     returnDate: undefined,
     passengers: 1,
     tripType: 'one-way',
@@ -56,21 +60,63 @@ export default function SearchScreen() {
     loadRoutes();
   }, []);
 
+  const loadAvailability = async (routesData: Route[]) => {
+    try {
+      const entries = await Promise.all(
+        routesData.map(async (r) => {
+          try {
+            const seats = await seatsService.getAvailableSeats(r.id);
+            return [r.id, seats.length] as [string, number];
+          } catch (e) {
+            console.error('Erro ao buscar assentos disponíveis para rota', r.id, e);
+            return [r.id, 0] as [string, number];
+          }
+        })
+      );
+      setAvailableSeatsMap(Object.fromEntries(entries));
+    } catch (error) {
+      console.error('Erro ao carregar disponibilidade de assentos:', error);
+    }
+  };
+
+  const loadBusInfo = async (routesData: Route[]) => {
+    try {
+      const entries = await Promise.all(
+        routesData.map(async (r) => {
+          try {
+            const busId = (r as any).bus_id || r.bus_id;
+            if (!busId) return [r.id, null] as [string, { model: string; plate: string; type?: string } | null];
+            const bus = await busService.getBusById(busId);
+            return [r.id, bus ? { model: bus.model, plate: bus.plate, type: bus.type } : null];
+          } catch (e) {
+            console.error('Erro ao buscar informações do ônibus para rota', r.id, e);
+            return [r.id, null] as [string, { model: string; plate: string; type?: string } | null];
+          }
+        })
+      );
+      setBusInfoMap(Object.fromEntries(entries));
+    } catch (error) {
+      console.error('Erro ao carregar informações de veículo:', error);
+    }
+  };
+
   const loadRoutes = async () => {
     try {
       setLoading(true);
       const routesData = await busRoutesService.getAllRoutes();
-      setRoutes(routesData.map(route => ({
+      const mappedRoutes = (routesData || []).map(route => ({
         id: route.id,
         origin: route.origin,
         destination: route.destination,
-        departure_time: route.departure,
-        arrival: route.arrival,
+        departure_datetime: (route as any).departure_datetime || (route as any).departure_time,
+        arrival_datetime: (route as any).arrival_datetime || (route as any).arrival_time,
         price: route.price,
         bus_type: route.bus_type,
         amenities: route.amenities || [],
-       
-      })) || []);
+        bus_id: (route as any).bus_id,
+      }));
+      setRoutes(mappedRoutes);
+      await Promise.all([loadAvailability(mappedRoutes), loadBusInfo(mappedRoutes)]);
     } catch (error) {
       console.error('Erro ao carregar rotas:', error);
       Alert.alert('Erro', 'Não foi possível carregar as rotas disponíveis.');
@@ -79,15 +125,29 @@ export default function SearchScreen() {
     }
   };
 
-  const handleDateChange = (event: any, selectedDate?: Date, type: 'departure' | 'return' = 'departure') => {
+  const formatDateString = (dateString: string) => {
+    try {
+      const date = new Date(dateString);
+      if (isNaN(date.getTime())) return dateString;
+      return date.toLocaleDateString('pt-BR', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+      });
+    } catch (error) {
+      return dateString || 'Data inválida';
+    }
+  };
+
+  const handleDateChange = (event: any, selectedDate?: Date, type: 'departure_datetime' | 'return' = 'departure_datetime') => {
     if (Platform.OS === 'android') {
-      setShowDepartureDatePicker(false);
+      setShowdeparture_datetimePicker(false);
       setShowReturnDatePicker(false);
     }
 
     if (selectedDate) {
-      if (type === 'departure') {
-        setSearchForm(prev => ({ ...prev, departureDate: selectedDate }));
+      if (type === 'departure_datetime') {
+        setSearchForm(prev => ({ ...prev, departure_datetime: selectedDate }));
       } else {
         setSearchForm(prev => ({ ...prev, returnDate: selectedDate }));
       }
@@ -128,13 +188,15 @@ export default function SearchScreen() {
   };
 
   const getBusTypeLabel = (type: string) => {
+    const normalized = (type || '').toLowerCase().replace(/\s+/g, '-');
     const types: { [key: string]: string } = {
       'convencional': 'Convencional',
       'executivo': 'Executivo',
       'leito': 'Leito',
       'semi-leito': 'Semi-Leito',
+      'semi leito': 'Semi-Leito',
     };
-    return types[type] || type;
+    return types[normalized] || type;
   };
 
   const handleRouteSelect = (route: Route) => {
@@ -153,7 +215,7 @@ export default function SearchScreen() {
       params: {
         origin: searchForm.selectedRoute.origin,
         destination: searchForm.selectedRoute.destination,
-        date: searchForm.departureDate.toISOString(),
+        date: searchForm.departure_datetime.toISOString(),
         returnDate: searchForm.returnDate?.toISOString(),
         passengers: searchForm.passengers.toString(),
         tripType: searchForm.tripType,
@@ -163,7 +225,7 @@ export default function SearchScreen() {
   };
 
   return (
-    <ScrollView style={styles.container}>
+    <View style={styles.container}>
       {/* Header */}
       <LinearGradient colors={['#DC2626', '#B91C1C']} style={styles.header}>
         <Text style={styles.headerTitle}>Buscar Passagens</Text>
@@ -173,7 +235,7 @@ export default function SearchScreen() {
       </LinearGradient>
 
       {/* Search Card */}
-      <View style={styles.searchCard}>
+      <ScrollView style={styles.searchCard}>
         {/* Trip Type */}
         <View style={styles.tripTypeContainer}>
           <TouchableOpacity
@@ -236,13 +298,41 @@ export default function SearchScreen() {
                       <Text style={styles.routeText}>
                         {route.origin} → {route.destination}
                       </Text>
-                      <Text style={styles.routeTime}>
-                        {formatTime(route.departure_time)} - {formatTime(route.arrival)}
+                       <Text style={styles.routeTime}>
+                        Data: {formatDateString(route.departure_datetime)}
                       </Text>
+                      <Text style={styles.routeTime}>
+                        
+                        Embarque: {formatTime(route.departure_datetime)} 
+                        </Text>
+                        <Text style={styles.routeTime}>Duração: {(() => {
+                          try {
+                            const start = new Date(route.departure_datetime);
+                            const end = new Date(route.arrival_datetime);
+                            const diffMs = end.getTime() - start.getTime();
+                            if (!isFinite(diffMs) || diffMs <= 0) return '';
+                            const totalMinutes = Math.round(diffMs / 60000);
+                            const hours = Math.floor(totalMinutes / 60);
+                            const minutes = totalMinutes % 60;
+                            const hPart = `${hours}h`;
+                            const mPart = `${minutes}m`;
+                            return `${hPart} ${mPart}`;
+                          } catch {
+                            return '';
+                          }
+                        })()}</Text>
+                         
+                      
+                     
+                      {busInfoMap[route.id] && (
+                        <Text style={styles.vehicleText}>
+                          Ônibus: {busInfoMap[route.id]?.model} • Placa {busInfoMap[route.id]?.plate}
+                        </Text>
+                      )}
                     </View>
                     <View style={styles.routePrice}>
                       <Text style={styles.priceText}>R$ {route.price.toFixed(2)}</Text>
-                      <Text style={styles.busTypeText}>{getBusTypeLabel(route.bus_type)}</Text>
+                      <Text style={styles.busTypeText}>{getBusTypeLabel(busInfoMap[route.id]?.type || route.bus_type)}</Text>
                     </View>
                   </View>
                   
@@ -257,11 +347,13 @@ export default function SearchScreen() {
                         <Text style={styles.moreAmenities}>+{(route.amenities || []).length - 3}</Text>
                       )}
                     </View>
-                    
+                    <Text style={styles.availabilityText}>
+                      {availableSeatsMap[route.id] !== undefined ? `${availableSeatsMap[route.id]} Poltronas disponíveis` : ''}
+                    </Text>
                   </View>
                 </TouchableOpacity>
-              ))}
-            </ScrollView>
+                ))}
+              </ScrollView>
           )}
         </View>
 
@@ -269,12 +361,12 @@ export default function SearchScreen() {
         <View style={styles.datesContainer}>
           <TouchableOpacity
             style={styles.dateInput}
-            onPress={() => setShowDepartureDatePicker(true)}
+            onPress={() => setShowdeparture_datetimePicker(true)}
           >
             <Ionicons name="calendar" size={20} color="#DC2626" />
             <View style={styles.dateContent}>
               <Text style={styles.dateLabel}>Data de ida</Text>
-              <Text style={styles.dateValue}>{formatDate(searchForm.departureDate)}</Text>
+              <Text style={styles.dateValue}>{formatDate(searchForm.departure_datetime)}</Text>
             </View>
           </TouchableOpacity>
 
@@ -325,15 +417,15 @@ export default function SearchScreen() {
           <Ionicons name="search" size={20} color="#FFFFFF" />
           <Text style={styles.searchButtonText}>Buscar Passagens</Text>
         </TouchableOpacity>
-      </View>
+      </ScrollView>
 
       {/* Date Pickers */}
-      {showDepartureDatePicker && (
+      {showdeparture_datetimePicker && (
         <DateTimePicker
-          value={searchForm.departureDate}
+          value={searchForm.departure_datetime}
           mode="date"
           display="default"
-          onChange={(event, date) => handleDateChange(event, date, 'departure')}
+          onChange={(event, date) => handleDateChange(event, date, 'departure_datetime')}
           minimumDate={new Date()}
         />
       )}
@@ -344,10 +436,10 @@ export default function SearchScreen() {
           mode="date"
           display="default"
           onChange={(event, date) => handleDateChange(event, date, 'return')}
-          minimumDate={searchForm.departureDate}
+          minimumDate={searchForm.departure_datetime}
         />
       )}
-    </ScrollView>
+    </View>
   );
 }
 
@@ -355,6 +447,7 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#F3F4F6',
+    bottom:10,
   },
   header: {
     paddingTop: 60,
@@ -379,6 +472,7 @@ const styles = StyleSheet.create({
     margin: 20,
     borderRadius: 16,
     padding: 20,
+    bottom:10,
     shadowColor: '#000',
     shadowOffset: {
       width: 0,
@@ -577,6 +671,12 @@ const styles = StyleSheet.create({
     shadowRadius: 2,
     elevation: 2,
   },
+  vehicleText:{
+    fontSize: 14,
+    color: '#020c97ff',
+    fontWeight: '500',
+
+  },
   passengerCount: {
     fontSize: 18,
     fontWeight: '600',
@@ -599,7 +699,8 @@ const styles = StyleSheet.create({
     },
     shadowOpacity: 0.3,
     shadowRadius: 8,
-    elevation: 8,
+    elevation: 4,
+    marginBottom: 40,
   },
   searchButtonText: {
     color: '#FFFFFF',

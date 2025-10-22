@@ -1,7 +1,7 @@
-import { createClient } from '@supabase/supabase-js';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Platform } from 'react-native';
+import { createClient } from '@supabase/supabase-js';
 import Constants from 'expo-constants';
+import { Platform } from 'react-native';
 
 const supabaseUrl = (process.env.EXPO_PUBLIC_SUPABASE_URL ?? (Constants.expoConfig?.extra as any)?.supabaseUrl ?? '').trim();
 const supabaseAnonKey = (process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? (Constants.expoConfig?.extra as any)?.supabaseAnonKey ?? '').trim();
@@ -38,8 +38,8 @@ export interface BusRoute {
   id: string;
   origin: string;
   destination: string;
-  departure: string;
-  arrival: string;
+  departure_datetime: string;
+  arrival_datetime: string;
   price: number;
   bus_company: string;
   bus_type: string;

@@ -1,4 +1,4 @@
-import { supabase, BusRoute } from '../lib/supabase';
+import { BusRoute, supabase } from '../lib/supabase';
 
 export const busRoutesService = {
   async searchRoutes(origin: string, destination: string, date: Date) {
@@ -7,7 +7,7 @@ export const busRoutesService = {
       .select('*')
       .eq('origin', origin)
       .eq('destination', destination)
-      .order('departure', { ascending: true });
+      .order('departure_datetime', { ascending: true });
 
     if (error) throw error;
     return data as BusRoute[];
@@ -28,7 +28,7 @@ export const busRoutesService = {
     const { data, error } = await supabase
       .from('routes')
       .select('*')
-      .order('departure', { ascending: true })
+      .order('departure_datetime', { ascending: true })
       .limit(10);
 
     if (error) throw error;
@@ -85,7 +85,7 @@ export const busRoutesService = {
     const { data, error } = await supabase
       .from('routes')
       .select('*')
-      .order('departure', { ascending: true });
+      .order('departure_datetime', { ascending: true });
 
     if (error) {
       console.error('Error fetching all routes:', error);
