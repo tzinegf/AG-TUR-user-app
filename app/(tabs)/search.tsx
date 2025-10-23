@@ -32,6 +32,7 @@ interface Route {
 
 interface SearchForm {
   selectedRoute: Route | null;
+  selectedReturnRoute: Route | null;
   departure_datetime: Date;
   returnDate?: Date;
   passengers: number;
@@ -50,6 +51,7 @@ export default function SearchScreen() {
 
   const [searchForm, setSearchForm] = useState<SearchForm>({
     selectedRoute: null,
+    selectedReturnRoute: null,
     departure_datetime: new Date(),
     returnDate: undefined,
     passengers: 1,
@@ -199,17 +201,49 @@ export default function SearchScreen() {
     return types[normalized] || type;
   };
 
+  // Helper para comparar somente a parte de data (dia/mês/ano)
+  const isSameDate = (dateStr: string, selectedDate: Date) => {
+    try {
+      const d = new Date(dateStr);
+      if (isNaN(d.getTime())) return false;
+      return (
+        d.getFullYear() === selectedDate.getFullYear() &&
+        d.getMonth() === selectedDate.getMonth() &&
+        d.getDate() === selectedDate.getDate()
+      );
+    } catch {
+      return false;
+    }
+  };
+
+  // Normalizar nomes de cidade/origem/destino para comparação
+  const normalizePlace = (s?: string) => (s || '').trim().toLowerCase();
+
   const handleRouteSelect = (route: Route) => {
     setSearchForm(prev => ({ ...prev, selectedRoute: route }));
   };
 
+  const handleReturnRouteSelect = (route: Route) => {
+    setSearchForm(prev => ({ ...prev, selectedReturnRoute: route }));
+  };
+
   const handleSearch = () => {
-    if (!searchForm.selectedRoute) {
-      Alert.alert('Erro', 'Por favor, selecione uma rota.');
-      return;
+    if (searchForm.tripType === 'one-way') {
+      if (!searchForm.selectedRoute) {
+        Alert.alert('Erro', 'Por favor, selecione uma rota de ida.');
+        return;
+      }
+    } else {
+      if (!searchForm.selectedRoute) {
+        Alert.alert('Erro', 'Selecione a rota de ida.');
+        return;
+      }
+      if (!searchForm.selectedReturnRoute) {
+        Alert.alert('Erro', 'Selecione a rota de volta.');
+        return;
+      }
     }
 
-    // Navegar para a tela de resultados com os parâmetros de busca
     router.push({
       pathname: '/search/results',
       params: {
@@ -220,9 +254,24 @@ export default function SearchScreen() {
         passengers: searchForm.passengers.toString(),
         tripType: searchForm.tripType,
         routeId: searchForm.selectedRoute.id,
+        returnRouteId: searchForm.selectedReturnRoute?.id || '',
       },
     });
   };
+
+  // Filtrar rotas pela data selecionada de ida
+  const filteredRoutes = routes.filter((r) => isSameDate(r.departure_datetime, searchForm.departure_datetime));
+
+  // Filtrar rotas pela data selecionada de volta (quando ida e volta)
+  const filteredReturnRoutes = (searchForm.tripType === 'round-trip' && searchForm.returnDate)
+    ? routes.filter((r) => {
+        const matchesDate = isSameDate(r.departure_datetime, searchForm.returnDate as Date);
+        if (!searchForm.selectedRoute) return matchesDate;
+        const reversedOD = normalizePlace(r.origin) === normalizePlace(searchForm.selectedRoute.destination) &&
+                           normalizePlace(r.destination) === normalizePlace(searchForm.selectedRoute.origin);
+        return matchesDate && reversedOD;
+      })
+    : [];
 
   return (
     <View style={styles.container}>
@@ -268,7 +317,7 @@ export default function SearchScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* Routes List */}
+        {/* Routes List (Ida) */}
         <View style={styles.routesContainer}>
           <Text style={styles.inputLabel}>Selecione sua rota</Text>
           {loading ? (
@@ -277,6 +326,9 @@ export default function SearchScreen() {
               <Text style={styles.loadingText}>Carregando rotas...</Text>
             </View>
           ) : (
+            filteredRoutes.length === 0 ? (
+              <Text style={styles.loadingText}>Nenhuma rota disponível na data selecionada.</Text>
+            ) : (
             <ScrollView 
               style={styles.routesList} 
               showsVerticalScrollIndicator={true}
@@ -284,7 +336,7 @@ export default function SearchScreen() {
               bounces={true}
               contentContainerStyle={styles.routesListContent}
             >
-              {routes.map((route) => (
+              {filteredRoutes.map((route) => (
                 <TouchableOpacity
                   key={route.id}
                   style={[
@@ -354,8 +406,100 @@ export default function SearchScreen() {
                 </TouchableOpacity>
                 ))}
               </ScrollView>
+            )
           )}
         </View>
+
+        {/* Routes List (Volta) */}
+        {searchForm.tripType === 'round-trip' && (
+          <View style={styles.routesContainer}>
+            <Text style={styles.inputLabel}>Rotas de volta na data selecionada</Text>
+            {loading ? (
+              <View style={styles.loadingContainer}>
+                <ActivityIndicator size="large" color="#DC2626" />
+                <Text style={styles.loadingText}>Carregando rotas...</Text>
+              </View>
+            ) : (
+              filteredReturnRoutes.length === 0 ? (
+                <Text style={styles.loadingText}>Nenhuma rota de volta disponível nessa data.</Text>
+              ) : (
+              <ScrollView 
+                style={styles.routesList} 
+                showsVerticalScrollIndicator={true}
+                nestedScrollEnabled={true}
+                bounces={true}
+                contentContainerStyle={styles.routesListContent}
+              >
+                {filteredReturnRoutes.map((route) => (
+                  <TouchableOpacity
+                    key={route.id}
+                    style={[
+                      styles.routeCard,
+                      searchForm.selectedReturnRoute?.id === route.id && styles.routeCardSelected,
+                    ]}
+                    onPress={() => handleReturnRouteSelect(route)}
+                  >
+                    <View style={styles.routeHeader}>
+                      <View style={styles.routeInfo}>
+                        <Text style={styles.routeText}>
+                          {route.origin} → {route.destination}
+                        </Text>
+                         <Text style={styles.routeTime}>
+                          Data: {formatDateString(route.departure_datetime)}
+                        </Text>
+                        <Text style={styles.routeTime}>
+                          Embarque: {formatTime(route.departure_datetime)}
+                        </Text>
+                        <Text style={styles.routeTime}>Duração: {(() => {
+                          try {
+                            const start = new Date(route.departure_datetime);
+                            const end = new Date(route.arrival_datetime);
+                            const diffMs = end.getTime() - start.getTime();
+                            if (!isFinite(diffMs) || diffMs <= 0) return '';
+                            const totalMinutes = Math.round(diffMs / 60000);
+                            const hours = Math.floor(totalMinutes / 60);
+                            const minutes = totalMinutes % 60;
+                            const hPart = `${hours}h`;
+                            const mPart = `${minutes}m`;
+                            return `${hPart} ${mPart}`;
+                          } catch {
+                            return '';
+                          }
+                        })()}</Text>
+                        {busInfoMap[route.id] && (
+                          <Text style={styles.vehicleText}>
+                            Ônibus: {busInfoMap[route.id]?.model} • Placa {busInfoMap[route.id]?.plate}
+                          </Text>
+                        )}
+                      </View>
+                      <View style={styles.routePrice}>
+                        <Text style={styles.priceText}>R$ {route.price.toFixed(2)}</Text>
+                        <Text style={styles.busTypeText}>{getBusTypeLabel(busInfoMap[route.id]?.type || route.bus_type)}</Text>
+                      </View>
+                    </View>
+                    
+                    <View style={styles.routeDetails}>
+                      <View style={styles.amenitiesContainer}>
+                        {(route.amenities || []).slice(0, 3).map((amenity, index) => (
+                          <View key={index} style={styles.amenityTag}>
+                            <Text style={styles.amenityText}>{amenity}</Text>
+                          </View>
+                        ))}
+                        {(route.amenities || []).length > 3 && (
+                          <Text style={styles.moreAmenities}>+{(route.amenities || []).length - 3}</Text>
+                        )}
+                      </View>
+                      <Text style={styles.availabilityText}>
+                        {availableSeatsMap[route.id] !== undefined ? `${availableSeatsMap[route.id]} Poltronas disponíveis` : ''}
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              )
+            )}
+          </View>
+        )}
 
         {/* Dates */}
         <View style={styles.datesContainer}>

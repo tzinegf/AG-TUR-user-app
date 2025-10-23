@@ -1,22 +1,22 @@
-import React, { useState, useEffect } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TouchableOpacity,
-  ActivityIndicator,
-  FlatList,
-  Modal,
-  Alert,
-} from 'react-native';
-import { useLocalSearchParams, router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { LinearGradient } from 'expo-linear-gradient';
-import { busRoutesService } from '../../services/busRoutes';
-import { BusRoute } from '../../lib/supabase';
-import { format, parseISO, differenceInMinutes } from 'date-fns';
+import { differenceInMinutes, format, parseISO } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
+import { LinearGradient } from 'expo-linear-gradient';
+import { router, useLocalSearchParams } from 'expo-router';
+import React, { useEffect, useState } from 'react';
+import {
+    ActivityIndicator,
+    FlatList,
+    Modal,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View
+} from 'react-native';
+import { busRoutesService } from '../../services/busRoutes';
+import { seatsService } from '../../services/seats';
+import { BusRoute } from '../../lib/supabase';
 
 interface Trip {
   id: string;
@@ -38,9 +38,10 @@ interface Trip {
 
 export default function SearchResults() {
   const params = useLocalSearchParams();
-  const { origin, destination, date: dateParam, passengers } = params;
+  const { origin, destination, date: dateParam, passengers, tripType, returnDate, routeId, returnRouteId } = params;
   
   const [trips, setTrips] = useState<Trip[]>([]);
+  const [combinedTrip, setCombinedTrip] = useState<{ outbound: Trip; returnTrip: Trip; totalPrice: number } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sortBy, setSortBy] = useState<'price' | 'departure' | 'duration'>('price');
@@ -56,10 +57,10 @@ export default function SearchResults() {
     loadTrips();
   }, []);
 
-  const calculateDuration = (departureTime: string, arrivalTime: string): string => {
+  const calculateDuration = (departureISO: string, arrivalISO: string): string => {
     try {
-      const departure = parseISO(`2024-01-01T${departureTime}:00`);
-      const arrival = parseISO(`2024-01-01T${arrivalTime}:00`);
+      const departure = parseISO(departureISO);
+      const arrival = parseISO(arrivalISO);
       const minutes = differenceInMinutes(arrival, departure);
       const hours = Math.floor(minutes / 60);
       const remainingMinutes = minutes % 60;
@@ -69,12 +70,12 @@ export default function SearchResults() {
     }
   };
 
-  const formatTime = (time: string): string => {
+  const formatTime = (iso: string): string => {
     try {
-      const date = parseISO(`2024-01-01T${time}:00`);
+      const date = parseISO(iso);
       return format(date, 'HH:mm');
     } catch (error) {
-      return time;
+      return '';
     }
   };
 
@@ -82,32 +83,91 @@ export default function SearchResults() {
     try {
       setLoading(true);
       setError(null);
+
+      // Se ida e volta com rotas já selecionadas, carregar ambas e montar card combinado
+      if ((tripType as string) === 'round-trip' && routeId && returnRouteId) {
+        const [outboundRoute, returnRoute] = await Promise.all([
+          busRoutesService.getRoute(routeId as string),
+          busRoutesService.getRoute(returnRouteId as string),
+        ]);
+
+        const [outSeats, retSeats] = await Promise.all([
+          seatsService.getAllSeatsForRoute(outboundRoute.id),
+          seatsService.getAllSeatsForRoute(returnRoute.id),
+        ]);
+
+        const mapToTrip = (route: BusRoute, seats: any[]): Trip => {
+          const availableSeats = (seats || []).filter((s) => s.is_available).length;
+          const totalSeats = (seats || []).length;
+          const busTypeNormalized = (route.bus_type || '')
+            .toLowerCase()
+            .replace(/\s+/g, '-');
+          return {
+            id: route.id,
+            companyName: route.bus_company,
+            departure: formatTime(route.departure_datetime),
+            arrivalTime: formatTime(route.arrival_datetime),
+            duration: calculateDuration(route.departure_datetime, route.arrival_datetime),
+            price: route.price,
+            originalPrice: undefined,
+            busType: busTypeNormalized as 'convencional' | 'executivo' | 'leito' | 'semi-leito',
+            availableSeats,
+            totalSeats,
+            amenities: route.amenities || [],
+            stops: 0,
+            rating: 4.5,
+            reviews: 120,
+          };
+        };
+
+        const outboundTrip = mapToTrip(outboundRoute, outSeats);
+        const returnTrip = mapToTrip(returnRoute, retSeats);
+        const totalPrice = (outboundTrip.price || 0) + (returnTrip.price || 0);
+        setCombinedTrip({ outbound: outboundTrip, returnTrip, totalPrice });
+        setTrips([]);
+        return;
+      }
       
+      // Fluxo padrão: buscar viagens de ida
       const routes = await busRoutesService.searchRoutes(
         origin as string,
         destination as string,
         new Date(dateParam as string)
       );
 
-      const mockTrips: Trip[] = routes.map((route, index) => ({
-        id: route.id,
-        companyName: route.bus_company,
-        departure: route.departure,
-        departureTime: formatTime(route.departure),
-        arrivalTime: formatTime(route.arrival),
-        duration: calculateDuration(route.departure, route.arrival),
-        price: route.price,
-        originalPrice: Math.random() > 0.5 ? route.price * 1.2 : undefined,
-        busType: route.bus_type as 'convencional' | 'executivo' | 'leito' | 'semi-leito',
-        availableSeats: Math.floor(Math.random() * 30) + 10, // Mock available seats
-        totalSeats: 45, // Mock total seats
-        amenities: route.amenities || [],
-        stops: Math.floor(Math.random() * 3),
-        rating: 4.0 + Math.random() * 1,
-        reviews: Math.floor(Math.random() * 500) + 50,
-      }));
+      // Buscar poltronas para cada rota em paralelo
+      const seatsByRoute = await Promise.all(
+        routes.map((route) => seatsService.getAllSeatsForRoute(route.id))
+      );
 
-      setTrips(mockTrips);
+      const tripsData: Trip[] = routes.map((route, index) => {
+        const seats = seatsByRoute[index] || [];
+        const availableSeats = seats.filter((s) => s.is_available).length;
+        const totalSeats = seats.length;
+
+        const busTypeNormalized = (route.bus_type || '')
+          .toLowerCase()
+          .replace(/\s+/g, '-');
+
+        return {
+          id: route.id,
+          companyName: route.bus_company,
+          departure: formatTime(route.departure_datetime),
+          arrivalTime: formatTime(route.arrival_datetime),
+          duration: calculateDuration(route.departure_datetime, route.arrival_datetime),
+          price: route.price,
+          originalPrice: undefined,
+          busType: busTypeNormalized as 'convencional' | 'executivo' | 'leito' | 'semi-leito',
+          availableSeats,
+          totalSeats,
+          amenities: route.amenities || [],
+          stops: 0,
+          rating: 4.5,
+          reviews: 120,
+        };
+      });
+
+      setTrips(tripsData);
     } catch (err) {
       console.error('Error loading trips:', err);
       setError('Erro ao carregar viagens. Tente novamente.');
@@ -182,6 +242,30 @@ export default function SearchResults() {
         arrivalTime: trip.arrivalTime,
         companyName: trip.companyName,
         busType: trip.busType,
+      },
+    });
+  };
+
+  const handleSelectCombinedTrip = () => {
+    if (!combinedTrip) return;
+    router.push({
+      pathname: '/search/booking',
+      params: {
+        tripId: combinedTrip.outbound.id,
+        returnTripId: combinedTrip.returnTrip.id,
+        tripType: 'round-trip',
+        from: origin as string,
+        to: destination as string,
+        date: dateParam as string,
+        returnDate: returnDate as string,
+        passengers,
+        // preço total das duas passagens
+        price: combinedTrip.totalPrice.toString(),
+        // manter dados do trecho de ida para exibir no header de booking
+        departure: combinedTrip.outbound.departure,
+        arrivalTime: combinedTrip.outbound.arrivalTime,
+        companyName: combinedTrip.outbound.companyName,
+        busType: combinedTrip.outbound.busType,
       },
     });
   };
@@ -262,10 +346,87 @@ export default function SearchResults() {
     );
   };
 
+  const renderCombinedTrip = () => {
+    if (!combinedTrip) return null;
+    const { outbound, returnTrip, totalPrice } = combinedTrip;
+    return (
+      <TouchableOpacity style={styles.tripCard} onPress={handleSelectCombinedTrip}>
+        {/* Company and Bus Type */}
+        <View style={styles.tripHeader}>
+          <View>
+            <Text style={styles.companyName}>{outbound.companyName}</Text>
+            <View style={styles.ratingContainer}>
+              <Ionicons name="star" size={14} color="#F59E0B" />
+              <Text style={styles.ratingText}>{outbound.rating.toFixed(1)}</Text>
+              <Text style={styles.reviewsText}>({outbound.reviews})</Text>
+            </View>
+          </View>
+          <View style={[styles.busTypeBadge, { backgroundColor: getBusTypeColor(outbound.busType) }]}>
+            <Text style={styles.busTypeText}>{getBusTypeLabel(outbound.busType)}</Text>
+          </View>
+        </View>
+
+        {/* Outbound Times */}
+        <View style={styles.tripTimes}>
+          <View style={styles.timeBlock}>
+            <Text style={styles.time}>{outbound.departure}</Text>
+            <Text style={styles.city}>{origin as string}</Text>
+          </View>
+          <View style={styles.durationBlock}>
+            <View style={styles.durationLine} />
+            <Text style={styles.duration}>{outbound.duration}</Text>
+          </View>
+          <View style={styles.timeBlock}>
+            <Text style={styles.time}>{outbound.arrivalTime}</Text>
+            <Text style={styles.city}>{destination as string}</Text>
+          </View>
+        </View>
+
+        {/* Return Times */}
+        <View style={[styles.tripTimes, { marginTop: 8 }] }>
+          <View style={styles.timeBlock}>
+            <Text style={styles.time}>{returnTrip.departure}</Text>
+            <Text style={styles.city}>{destination as string}</Text>
+          </View>
+          <View style={styles.durationBlock}>
+            <View style={styles.durationLine} />
+            <Text style={styles.duration}>{returnTrip.duration}</Text>
+          </View>
+          <View style={styles.timeBlock}>
+            <Text style={styles.time}>{returnTrip.arrivalTime}</Text>
+            <Text style={styles.city}>{origin as string}</Text>
+          </View>
+        </View>
+
+        {/* Amenities (merge simple) */}
+        <View style={styles.amenitiesContainer}>
+          {[...new Set([...(outbound.amenities || []), ...(returnTrip.amenities || [])])].slice(0, 6).map((amenity, index) => (
+            <View key={index} style={styles.amenityItem}>
+              <Ionicons name={getAmenityIcon(amenity)} size={16} color="#6B7280" />
+            </View>
+          ))}
+        </View>
+
+        {/* Price and Availability */}
+        <View style={styles.tripFooter}>
+          <View style={styles.availabilityContainer}>
+            <Text style={styles.availabilityText}>
+              {outbound.availableSeats} lugares ida • {returnTrip.availableSeats} volta
+            </Text>
+          </View>
+          <View style={styles.priceContainer}>
+            <Text style={styles.price}>R$ {totalPrice.toFixed(2)}</Text>
+            <Text style={styles.pricePerPerson}>total das duas passagens</Text>
+          </View>
+        </View>
+      </TouchableOpacity>
+    );
+  };
+
   return (
     <View style={styles.container}>
       {/* Header */}
-      <LinearGradient colors={['#DC2626', '#B91C1C']} style={styles.header}>
+      <LinearGradient colors={["#DC2626", "#B91C1C"]} style={styles.header}>
         <View style={styles.headerContent}>
           <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
             <Ionicons name="arrow-back" size={24} color="#FFFFFF" />
@@ -278,7 +439,6 @@ export default function SearchResults() {
                 try {
                   const parsedDate = parseISO(dateParam as string);
                   if (isNaN(parsedDate.getTime())) {
-                    // Se a data é inválida, tenta criar uma nova data a partir da string
                     const fallbackDate = new Date(dateParam as string);
                     return isNaN(fallbackDate.getTime()) ? 'Data inválida' : format(fallbackDate, "dd/MM/yyyy", { locale: ptBR });
                   }
@@ -349,6 +509,11 @@ export default function SearchResults() {
             <Text style={{ color: '#DC2626', fontWeight: '600' }}>Tentar novamente</Text>
           </TouchableOpacity>
         </View>
+      ) : combinedTrip ? (
+        <ScrollView contentContainerStyle={styles.listContainer}>
+          <Text style={styles.resultsCount}>1 combinação ida e volta selecionada</Text>
+          {renderCombinedTrip()}
+        </ScrollView>
       ) : (
         <FlatList
           data={sortTrips(trips)}

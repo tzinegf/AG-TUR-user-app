@@ -287,13 +287,13 @@ export default function HomeScreen() {
         <Text style={styles.activities}>Atividades</Text>
 
         <View style={styles.statsGrid}>
-          <View style={styles.statCard}>
+          <TouchableOpacity style={styles.statCard} onPress={() => router.push('/(tabs)/tickets')}>
              <View style={styles.statIconContainer}>
                <Ionicons name="bus" size={20} color="#DC2626" />
              </View>
              <Text style={styles.statValue}>{userStats.totalTrips}</Text>
              <Text style={styles.statLabel}>Viagens</Text>
-           </View>
+           </TouchableOpacity>
 
           <View style={styles.statCard}>
             <View style={styles.statIconContainer}>

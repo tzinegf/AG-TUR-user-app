@@ -14,6 +14,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors } from '../../constants/Colors';
 import { useAuth } from '../../contexts/AuthContext';
+import { useNotifications } from '../../contexts/NotificationsContext';
 import { userService } from '../../services/userService';
 import { supabase } from '../../lib/supabase';
 import { mask } from 'react-native-mask-text';
@@ -23,6 +24,7 @@ export default function ProfileScreen() {
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme ?? 'light'];
   const { user, signOut } = useAuth();
+  const { ready, testLocalNotification } = useNotifications();
   
   const [isEditing, setIsEditing] = useState(false);
   const [editedName, setEditedName] = useState(user?.name || '');
@@ -277,7 +279,13 @@ export default function ProfileScreen() {
               icon="notifications-outline"
               title="Notificações"
               subtitle="Gerencie suas notificações"
-              onPress={() => Alert.alert('Em breve', 'Funcionalidade em desenvolvimento')}
+              onPress={() => {
+                if (!ready) {
+                  Alert.alert('Notificações', 'Inicializando notificações... tente novamente em alguns segundos.');
+                  return;
+                }
+                testLocalNotification('Notificações ativadas', 'Você receberá alertas de viagem.');
+              }}
             />
             
             <MenuOption

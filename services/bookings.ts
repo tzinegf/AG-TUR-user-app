@@ -218,6 +218,25 @@ export const bookingsService = {
         .eq('id', id);
 
       if (error) throw error;
+
+      // Atualizar status dos pagamentos para 'refunded'
+      try {
+        const { error: paymentUpdateError } = await supabase
+          .from('payments')
+          .update({ status: 'refunded' })
+          .eq('booking_id', id)
+          .in('status', ['completed', 'pending']);
+
+        if (paymentUpdateError) {
+          const message = String((paymentUpdateError as any)?.message || '');
+          const isMissingPaymentsTable = message.includes("Could not find the table 'public.payments'");
+          if (!isMissingPaymentsTable) {
+            console.warn('Falha ao atualizar pagamentos para refund:', paymentUpdateError);
+          }
+        }
+      } catch (e) {
+        console.warn('Erro ao tentar marcar pagamentos como refund:', e);
+      }
     } catch (error) {
       console.error('Error cancelling booking:', error);
       throw error;

@@ -4,6 +4,7 @@ import { useEffect } from 'react';
 import { Stack } from 'expo-router';
 import { AuthProvider } from '../contexts/AuthContext';
 import { ThemeProvider } from '../contexts/ThemeContext';
+import { NotificationsProvider } from '../contexts/NotificationsContext';
 import {
   DarkTheme,
   DefaultTheme,
@@ -51,16 +52,18 @@ function RootLayoutNav() {
   return (
     <AuthProvider>
       <ThemeProvider>
-        <NavigationThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-          <Stack>
-        <Stack.Screen name="index" options={{ headerShown: false }} />
-            <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-            <Stack.Screen name="auth" options={{ headerShown: false }} />
-            <Stack.Screen name="admin" options={{ headerShown: false }} />
-            <Stack.Screen name="search" options={{ headerShown: false }} />
-            <Stack.Screen name="support" options={{ headerShown: false }} />
-          </Stack>
-        </NavigationThemeProvider>
+        <NotificationsProvider>
+          <NavigationThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+            <Stack>
+              <Stack.Screen name="index" options={{ headerShown: false }} />
+              <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+              <Stack.Screen name="auth" options={{ headerShown: false }} />
+              <Stack.Screen name="admin" options={{ headerShown: false }} />
+              <Stack.Screen name="search" options={{ headerShown: false }} />
+              <Stack.Screen name="support" options={{ headerShown: false }} />
+            </Stack>
+          </NavigationThemeProvider>
+        </NotificationsProvider>
       </ThemeProvider>
     </AuthProvider>
   );

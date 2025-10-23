@@ -23,6 +23,8 @@ import { BusRoute } from '../../lib/supabase';
 import { format, parseISO } from 'date-fns';
 import { mask } from 'react-native-mask-text';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { couponsService } from '../../services/coupons';
 
 interface Passenger {
   name: string;
@@ -53,16 +55,18 @@ export default function BookingScreen() {
   console.log('🔍 DEBUG: params keys includes tripId?', Object.keys(params).includes('tripId'));
   console.log('🔍 DEBUG: params keys includes passengers?', Object.keys(params).includes('passengers'));
 
-  const { 
-    tripId,  // 🔧 Mudança: usar tripId em vez de routeId
-    from, 
-    to, 
-    date, 
-    departureTime, 
-    arrivalTime, 
-    price, 
-    companyName, 
-    passengers  // 🔧 Mudança: usar passengers em vez de passengerCount
+  const {
+    tripId,
+    from,
+    to,
+    date,
+    departureTime,
+    arrivalTime,
+    price,
+    companyName,
+    passengers,
+    tripType,
+    returnTripId,
   } = params;
 
   // Use tripId as routeId for backward compatibility
@@ -80,6 +84,7 @@ export default function BookingScreen() {
   const [selectedSeats, setSelectedSeats] = useState<Seat[]>([]);
   const [availableSeats, setAvailableSeats] = useState<Seat[]>([]);
   const [seatLayout, setSeatLayout] = useState<{ [key: number]: Seat[] }>({});
+  const [totalSeatsCount, setTotalSeatsCount] = useState<number>(0);
   const [passengerData, setPassengerData] = useState<Passenger[]>([]);
   const [paymentMethod, setPaymentMethod] = useState<'credit' | 'debit' | 'pix'>('credit');
   const [cardData, setCardData] = useState({
@@ -91,12 +96,119 @@ export default function BookingScreen() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [routeDetails, setRouteDetails] = useState<BusRoute | null>(null);
+  // Adicionados estados para a volta
+  const [returnRouteDetails, setReturnRouteDetails] = useState<BusRoute | null>(null);
+  const [selectedReturnSeats, setSelectedReturnSeats] = useState<Seat[]>([]);
+  const [returnAvailableSeats, setReturnAvailableSeats] = useState<Seat[]>([]);
+  const [returnSeatLayout, setReturnSeatLayout] = useState<{ [key: number]: Seat[] }>({});
+
+  // Cupom de desconto - manter hooks antes de quaisquer retornos
+  const [couponCode, setCouponCode] = useState('');
+  const [couponApplied, setCouponApplied] = useState(false);
+  const [couponError, setCouponError] = useState<string | null>(null);
+  const [discountAmount, setDiscountAmount] = useState<number>(0);
+  const [appliedCoupon, setAppliedCoupon] = useState<any>(null);
+
+  // Helpers de formatação para consistência com results.tsx
+  const formatDateSafe = (dateString?: string) => {
+    try {
+      if (!dateString) return '';
+      const parsed = parseISO(dateString);
+      if (isNaN(parsed.getTime())) return '';
+      return format(parsed, 'dd/MM/yyyy');
+    } catch {
+      return '';
+    }
+  };
+
+  const formatTimeSafe = (dateString?: string) => {
+    try {
+      if (!dateString) return '';
+      const parsed = parseISO(dateString);
+      if (isNaN(parsed.getTime())) return '';
+      return format(parsed, 'HH:mm');
+    } catch {
+      return '';
+    }
+  };
+
+  // Conversão segura para número
+  const toNumber = (value: any, fallback = 0) => {
+    const n = typeof value === 'number' ? value : parseFloat(String(value));
+    return Number.isFinite(n) ? n : fallback;
+  };
+
+  const calculateDuration = (departure?: string, arrival?: string) => {
+    try {
+      if (!departure || !arrival) return '';
+      const d = parseISO(departure);
+      const a = parseISO(arrival);
+      if (isNaN(d.getTime()) || isNaN(a.getTime())) return '';
+      const diffMs = a.getTime() - d.getTime();
+      if (diffMs <= 0) return '';
+      const totalMinutes = Math.floor(diffMs / 60000);
+      const hours = Math.floor(totalMinutes / 60);
+      const minutes = totalMinutes % 60;
+      return `${hours}h ${minutes}min`;
+    } catch {
+      return '';
+    }
+  };
+
+  const normalizeBusType = (busType?: string) => {
+    const t = (busType || '').toLowerCase();
+    if (t.includes('execut')) return 'executivo';
+    if (t.includes('semi')) return 'semi-leito';
+    if (t.includes('leito')) return 'leito';
+    return 'convencional';
+  };
+
+  const getBusTypeLabel = (type: string) => {
+    switch (type) {
+      case 'executivo': return 'Executivo';
+      case 'semi-leito': return 'Semi-Leito';
+      case 'leito': return 'Leito';
+      case 'convencional':
+      default: return 'Convencional';
+    }
+  };
+
+  // Formatar desconto conforme o tipo do cupom
+  const formatDiscount = (discount: number, coupon?: any) => {
+    if (!coupon) return formatCurrencyBRL(discount);
+    
+    if (coupon.type === 'percent') {
+      const baseTotal = (() => {
+        const passengersCountNum = parseInt(passengerCount as string) || 1;
+        const priceNum = toNumber(price as string, 0);
+        const isRoundTrip = (tripType as string) === 'round-trip' && !!returnTripId;
+        const idaPrice = toNumber(
+          routeDetails?.price ?? (isRoundTrip ? priceNum / 2 : priceNum),
+          0
+        );
+        const voltaPrice = isRoundTrip
+          ? toNumber(returnRouteDetails?.price ?? (priceNum / 2), 0)
+          : 0;
+        return isRoundTrip
+          ? ((idaPrice + voltaPrice) * passengersCountNum)
+          : (idaPrice * passengersCountNum);
+      })();
+      
+      const percentage = baseTotal > 0 ? Math.round((discount / baseTotal) * 100) : 0;
+      return `${percentage}% (${formatCurrencyBRL(discount)})`;
+    }
+    
+    return formatCurrencyBRL(discount);
+  };
+
+  // moved helper fetch functions above useEffect to avoid undefined in effects
 
   useEffect(() => {
     console.log('🔄 DEBUG: useEffect triggered');
     console.log('🔄 DEBUG: routeId in useEffect:', routeId);
     console.log('🔄 DEBUG: passengerCount in useEffect:', passengerCount);
     console.log('🔄 DEBUG: user in useEffect:', user?.id);
+    console.log('🔄 DEBUG: returnTripId in useEffect:', returnTripId);
     
     if (routeId) {
       console.log('✅ DEBUG: routeId exists, calling fetchRouteDetails and fetchSeats');
@@ -104,6 +216,12 @@ export default function BookingScreen() {
       fetchSeats();
     } else {
       console.log('❌ DEBUG: routeId is missing or falsy:', routeId);
+    }
+
+    if (returnTripId) {
+      console.log('✅ DEBUG: returnTripId exists, calling fetchReturnRouteDetails and fetchReturnSeats');
+      fetchReturnRouteDetails();
+      fetchReturnSeats();
     }
     
     // Initialize passengers array based on passenger count
@@ -117,7 +235,7 @@ export default function BookingScreen() {
       phone: index === 0 ? (user?.phone ? mask(user.phone, '(99) 99999-9999') : '') : ''
     }));
     setPassengerData(initialPassengers);
-  }, [routeId, passengerCount, user]);
+  }, [routeId, passengerCount, user, returnTripId]);
 
   // Prefill from profiles if missing in auth metadata
   useEffect(() => {
@@ -184,43 +302,51 @@ export default function BookingScreen() {
     try {
       setLoading(true);
       console.log('🔍 DEBUG: Fetching seats for route:', routeId);
-      
       const seats = await seatsService.getAllSeatsForRoute(routeId as string);
       console.log('🪑 DEBUG: Raw seats data:', seats);
       console.log('🪑 DEBUG: Seats count:', seats?.length || 0);
-      
       const layout = await seatsService.getSeatLayout(routeId as string);
       console.log('🗺️ DEBUG: Raw layout data:', layout);
       console.log('🗺️ DEBUG: Layout keys:', Object.keys(layout || {}));
       console.log('🗺️ DEBUG: Layout keys count:', Object.keys(layout || {}).length);
-      
       const available = seats.filter(seat => seat.is_available);
       console.log('✅ DEBUG: Available seats:', available.length);
       console.log('✅ DEBUG: Available seats data:', available);
-      
-      // Debug individual seat data
-      if (seats && seats.length > 0) {
-        console.log('🪑 DEBUG: First seat example:', seats[0]);
-        console.log('🪑 DEBUG: Seat properties:', Object.keys(seats[0]));
-      }
-      
-      // Debug layout structure
-      if (layout && Object.keys(layout).length > 0) {
-        const firstRowKey = Object.keys(layout)[0];
-        console.log('🗺️ DEBUG: First row key:', firstRowKey);
-        console.log('🗺️ DEBUG: First row data:', (layout as any)[firstRowKey]);
-      }
-      
       setAvailableSeats(available);
       setSeatLayout(layout);
-      
-      console.log('🎯 DEBUG: State updated - availableSeats:', available.length);
-      console.log('🎯 DEBUG: State updated - seatLayout keys:', Object.keys(layout || {}).length);
-      
     } catch (err) {
       console.error('❌ DEBUG: Error fetching seats:', err);
       console.error('❌ DEBUG: Error details:', JSON.stringify(err, null, 2));
       setError('Erro ao carregar poltronas disponíveis');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchReturnRouteDetails = async () => {
+    try {
+      setLoading(true);
+      const details = await busRoutesService.getRoute(returnTripId as string);
+      setReturnRouteDetails(details);
+    } catch (err) {
+      console.error('Error fetching return route details:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchReturnSeats = async () => {
+    try {
+      setLoading(true);
+      console.log('🔍 DEBUG: Fetching seats for return route:', returnTripId);
+      const seats = await seatsService.getAllSeatsForRoute(returnTripId as string);
+      const layout = await seatsService.getSeatLayout(returnTripId as string);
+      const available = seats.filter(seat => seat.is_available);
+      setReturnAvailableSeats(available);
+      setReturnSeatLayout(layout);
+    } catch (err) {
+      console.error('❌ DEBUG: Error fetching return seats:', err);
+      setError('Erro ao carregar poltronas da volta');
     } finally {
       setLoading(false);
     }
@@ -241,6 +367,21 @@ export default function BookingScreen() {
     }
   };
 
+  const handleReturnSeatSelect = (seat: Seat) => {
+    if (!seat.is_available) return;
+
+    const maxSeats = parseInt(passengerCount as string) || 1;
+    const isSelected = selectedReturnSeats.some(s => s.id === seat.id);
+
+    if (isSelected) {
+      setSelectedReturnSeats(selectedReturnSeats.filter(s => s.id !== seat.id));
+    } else if (selectedReturnSeats.length < maxSeats) {
+      setSelectedReturnSeats([...selectedReturnSeats, seat]);
+    } else {
+      Alert.alert('Limite de assentos', `Você pode selecionar no máximo ${maxSeats} assento(s) para a volta.`);
+    }
+  };
+
   const handlePassengerUpdate = (index: number, field: keyof Passenger, value: string) => {
     const updatedPassengers = [...passengerData];
     updatedPassengers[index] = { ...updatedPassengers[index], [field]: value };
@@ -257,8 +398,14 @@ export default function BookingScreen() {
       case 1:
         const requiredSeats = parseInt(passengerCount as string) || 1;
         if (selectedSeats.length !== requiredSeats) {
-          Alert.alert('Seleção de assentos', `Selecione ${requiredSeats} assento(s) para continuar.`);
+          Alert.alert('Seleção de assentos', `Selecione ${requiredSeats} assento(s) para a ida.`);
           return false;
+        }
+        if ((tripType as string) === 'round-trip' && returnTripId) {
+          if (selectedReturnSeats.length !== requiredSeats) {
+            Alert.alert('Seleção de assentos', `Selecione ${requiredSeats} assento(s) para a volta.`);
+            return false;
+          }
         }
         return true;
       
@@ -318,22 +465,77 @@ export default function BookingScreen() {
     try {
       setLoading(true);
       
-      const totalAmount = (routeDetails ? routeDetails.price : parseFloat(price as string)) * parseInt(passengerCount as string);
-      
-      // Extrair apenas os IDs das poltronas selecionadas
-      const seatIds = selectedSeats.map(seat => seat.id);
-      
-      await bookingsService.createBooking(
-        routeId as string,
-        seatIds,
-        totalAmount,
-        paymentMethod,
-        passengerData.map(p => ({ name: p.name, document: p.rg }))
-      );
+      const isRoundTrip = (tripType as string) === 'round-trip' && !!returnTripId;
+      const passengersCount = parseInt(passengerCount as string) || 1;
+
+      if (isRoundTrip) {
+        const idaAmount = (routeDetails ? routeDetails.price : parseFloat(price as string) / 2 || 0) * passengersCount;
+        const voltaAmount = (returnRouteDetails ? returnRouteDetails.price : parseFloat(price as string) / 2 || 0) * passengersCount;
+        const totalBoth = idaAmount + voltaAmount;
+        const ratioIda = totalBoth > 0 ? idaAmount / totalBoth : 0.5;
+        const ratioVolta = 1 - ratioIda;
+        const idaFinal = Math.max(0, idaAmount - discountAmount * ratioIda);
+        const voltaFinal = Math.max(0, voltaAmount - discountAmount * ratioVolta);
+
+        const idaSeatIds = selectedSeats.map(seat => seat.id);
+        const voltaSeatIds = selectedReturnSeats.map(seat => seat.id);
+
+        const idaBooking = await bookingsService.createBooking(
+          routeId as string,
+          idaSeatIds,
+          idaFinal,
+          paymentMethod,
+          passengerData.map(p => ({ name: p.name, document: p.rg }))
+        );
+
+        const voltaBooking = await bookingsService.createBooking(
+          returnTripId as string,
+          voltaSeatIds,
+          voltaFinal,
+          paymentMethod,
+          passengerData.map(p => ({ name: p.name, document: p.rg }))
+        );
+
+        if (couponApplied && appliedCoupon?.id && user?.id) {
+          const totalBothAmount = idaAmount + voltaAmount;
+          await couponsService.recordUsage({
+            coupon_id: appliedCoupon.id,
+            booking_id: null,
+            user_id: user.id,
+            amount_before: totalBothAmount,
+            amount_discount: Math.min(discountAmount, totalBothAmount),
+            amount_after: Math.max(0, totalBothAmount - discountAmount),
+          });
+        }
+      } else {
+        const baseAmount = routeDetails ? routeDetails.price : parseFloat(price as string);
+        const totalAmount = baseAmount * passengersCount;
+        const totalFinal = Math.max(0, totalAmount - discountAmount);
+        const seatIds = selectedSeats.map(seat => seat.id);
+        const booking = await bookingsService.createBooking(
+          routeId as string,
+          seatIds,
+          totalFinal,
+          paymentMethod,
+          passengerData.map(p => ({ name: p.name, document: p.rg }))
+        );
+
+        if (couponApplied && appliedCoupon?.id && user?.id) {
+          const totalAmount = (routeDetails ? routeDetails.price : parseFloat(price as string)) * passengersCount;
+          await couponsService.recordUsage({
+            coupon_id: appliedCoupon.id,
+            booking_id: booking?.id ?? null,
+            user_id: user.id,
+            amount_before: totalAmount,
+            amount_discount: Math.min(discountAmount, totalAmount),
+            amount_after: Math.max(0, totalAmount - discountAmount),
+          });
+        }
+      }
       
       Alert.alert(
         'Reserva confirmada!',
-        'Sua reserva foi realizada com sucesso.',
+        isRoundTrip ? 'Suas reservas de ida e volta foram realizadas com sucesso.' : 'Sua reserva foi realizada com sucesso.',
         [{ text: 'OK', onPress: () => router.push('/(tabs)') }]
       );
     } catch (err) {
@@ -342,6 +544,64 @@ export default function BookingScreen() {
     } finally {
       setLoading(false);
     }
+  };
+
+
+
+
+
+
+
+  const applyCoupon = async () => {
+    const code = (couponCode || '').trim().toUpperCase();
+    const passengersCountNum = parseInt(passengerCount as string) || 1;
+    const priceNum = toNumber(price as string, 0);
+    const isRoundTrip = (tripType as string) === 'round-trip' && !!returnTripId;
+    const idaPrice = toNumber(
+      routeDetails?.price ?? (isRoundTrip ? priceNum / 2 : priceNum),
+      0
+    );
+    const voltaPrice = isRoundTrip
+      ? toNumber(returnRouteDetails?.price ?? (priceNum / 2), 0)
+      : 0;
+    const baseTotal = isRoundTrip ? ((idaPrice + voltaPrice) * passengersCountNum) : (idaPrice * passengersCountNum);
+
+    setCouponError(null);
+    setCouponApplied(false);
+    setAppliedCoupon(null);
+
+    const result = await couponsService.applyCoupon(code, baseTotal, { tripType: isRoundTrip ? 'round-trip' : 'one-way' });
+    if (result.valid) {
+      setDiscountAmount(result.discount);
+      setCouponApplied(true);
+      setCouponError(null);
+      setAppliedCoupon(result.coupon);
+      return;
+    }
+
+    let pct: number | undefined;
+    if (code === 'AG20' || code === 'FIRST20') pct = 0.20;
+    else if (code === 'AG10') pct = 0.10;
+    if (!pct) {
+      setDiscountAmount(0);
+      setCouponApplied(false);
+      setCouponError(result.error || 'Cupom inválido ou expirado.');
+      setAppliedCoupon(null);
+      return;
+    }
+    const discount = Math.min(baseTotal, Math.round(baseTotal * pct * 100) / 100);
+    setDiscountAmount(discount);
+    setCouponApplied(true);
+    setCouponError(null);
+    setAppliedCoupon({ type: 'percent', value: pct, code });
+  };
+  
+  const removeCoupon = () => {
+    setCouponCode('');
+    setCouponApplied(false);
+    setCouponError(null);
+    setDiscountAmount(0);
+    setAppliedCoupon(null);
   };
 
   const renderSeatSelection = () => (
@@ -358,88 +618,135 @@ export default function BookingScreen() {
         Escolha {passengerCount} assento(s) para sua viagem
       </Text>
 
-      {/* Seat Legend */}
-      <View style={styles.seatLegend}>
-        <View style={styles.legendItem}>
-          <View style={[styles.legendSeat, styles.seatAvailable]} />
-          <Text style={styles.legendText}>Disponível</Text>
-        </View>
-        <View style={styles.legendItem}>
-          <View style={[styles.legendSeat, styles.seatSelected]} />
-          <Text style={styles.legendText}>Selecionado</Text>
-        </View>
-        <View style={styles.legendItem}>
-          <View style={[styles.legendSeat, styles.seatOccupied]} />
-          <Text style={styles.legendText}>Ocupado</Text>
-        </View>
-      </View>
+      {/* Ida */}
+      <View style={{ marginBottom: 24 }}>
+        <Text style={{ fontSize: 16, fontWeight: '600', color: '#1F2937', marginBottom: 12 }}>Poltronas da ida</Text>
+        <View style={styles.busLayout}>
+          <View style={styles.busContainer}>
+            {/* Driver */}
+            <View style={styles.busDriver}>
+              <Ionicons name="person" size={24} color="#6B7280" />
+            </View>
 
-      {/* Bus Layout */}
-      <View style={styles.busLayout}>
-        <View style={styles.busContainer}>
-          {/* Driver */}
-          <View style={styles.busDriver}>
-            <Ionicons name="person" size={24} color="#6B7280" />
+            {/* Seats */}
+            {Object.keys(seatLayout).length === 0 ? (
+              <View style={{ padding: 20, alignItems: 'center' }}>
+                <Text style={{ color: '#6B7280', fontSize: 16 }}>
+                  Nenhuma poltrona disponível para esta rota
+                </Text>
+              </View>
+            ) : (
+              Object.keys(seatLayout).sort((a, b) => parseInt(a) - parseInt(b)).map((rowKey) => {
+                const row = seatLayout[parseInt(rowKey)];
+                return (
+                  <View key={rowKey} style={styles.seatRow}>
+                    {row.map((seat, seatIndex) => {
+                      if (seat === null) {
+                        return <View key={seatIndex} style={styles.aisle} />;
+                      }
+                      const isSelected = selectedSeats.some(s => s.id === seat.id);
+                      return (
+                        <TouchableOpacity
+                          key={seatIndex}
+                          style={[
+                            styles.seat,
+                            seat.is_available ? styles.seatAvailable : styles.seatOccupied,
+                            isSelected && styles.seatSelected,
+                          ]}
+                          onPress={() => handleSeatSelect(seat)}
+                          disabled={!seat.is_available}
+                        >
+                          <Text style={[
+                            styles.seatText,
+                            isSelected && styles.seatTextSelected,
+                            !seat.is_available && styles.seatTextOccupied,
+                          ]}>
+                            {seat.seat_number}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                );
+              })
+            )}
           </View>
 
-          {/* Seats */}
-          {Object.keys(seatLayout).length === 0 ? (
-            <View style={{ padding: 20, alignItems: 'center' }}>
-              <Text style={{ color: '#6B7280', fontSize: 16 }}>
-                Nenhuma poltrona disponível para esta rota
-              </Text>
-            </View>
-          ) : (
-            Object.keys(seatLayout).sort((a, b) => parseInt(a) - parseInt(b)).map((rowKey) => {
-              const row = seatLayout[parseInt(rowKey)];
-              return (
-                <View key={rowKey} style={styles.seatRow}>
-                  {row.map((seat, seatIndex) => {
-                    if (seat === null) {
-                      return <View key={seatIndex} style={styles.aisle} />;
-                    }
-
-                    const isOccupied = !seat.is_available;
-                    const isSelected = selectedSeats.some(s => s.id === seat.id);
-
-                    return (
-                      <TouchableOpacity
-                        key={seat.id}
-                        style={[
-                          styles.seat,
-                          isOccupied && styles.seatOccupied,
-                          isSelected && styles.seatSelected,
-                          !isOccupied && !isSelected && styles.seatAvailable
-                        ]}
-                        onPress={() => handleSeatSelect(seat)}
-                        disabled={isOccupied}
-                      >
-                        <Text style={[
-                          styles.seatText,
-                          isOccupied && styles.seatTextOccupied,
-                          isSelected && styles.seatTextSelected
-                        ]}>
-                          {seat.seat_number}
-                        </Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-              );
-            })
-          )}
-        </View>
-
-        {/* Selected Seats Info */}
-        {selectedSeats.length > 0 && (
+          {/* Selected Seats Info */}
           <View style={styles.selectedSeatsInfo}>
-            <Text style={styles.selectedSeatsLabel}>Assentos selecionados:</Text>
+            <Text style={styles.selectedSeatsLabel}>Poltronas da ida selecionadas</Text>
             <Text style={styles.selectedSeatsText}>
-              {selectedSeats.map(seat => seat.seat_number).join(', ')}
+              {selectedSeats.map(s => s.seat_number).join(', ') || 'Nenhuma poltrona selecionada'}
             </Text>
           </View>
-        )}
+        </View>
       </View>
+
+      {/* Volta */}
+      {(tripType as string) === 'round-trip' && returnTripId && (
+        <View>
+          <Text style={{ fontSize: 16, fontWeight: '600', color: '#1F2937', marginBottom: 12 }}>Poltronas da volta</Text>
+          <View style={styles.busLayout}>
+            <View style={styles.busContainer}>
+              {/* Driver */}
+              <View style={styles.busDriver}>
+                <Ionicons name="person" size={24} color="#6B7280" />
+              </View>
+
+              {/* Seats */}
+              {Object.keys(returnSeatLayout).length === 0 ? (
+                <View style={{ padding: 20, alignItems: 'center' }}>
+                  <Text style={{ color: '#6B7280', fontSize: 16 }}>
+                    Nenhuma poltrona disponível para esta rota de volta
+                  </Text>
+                </View>
+              ) : (
+                Object.keys(returnSeatLayout).sort((a, b) => parseInt(a) - parseInt(b)).map((rowKey) => {
+                  const row = returnSeatLayout[parseInt(rowKey)];
+                  return (
+                    <View key={rowKey} style={styles.seatRow}>
+                      {row.map((seat, seatIndex) => {
+                        if (seat === null) {
+                          return <View key={seatIndex} style={styles.aisle} />;
+                        }
+                        const isSelected = selectedReturnSeats.some(s => s.id === seat.id);
+                        return (
+                          <TouchableOpacity
+                            key={seatIndex}
+                            style={[
+                              styles.seat,
+                              seat.is_available ? styles.seatAvailable : styles.seatOccupied,
+                              isSelected && styles.seatSelected,
+                            ]}
+                            onPress={() => handleReturnSeatSelect(seat)}
+                            disabled={!seat.is_available}
+                          >
+                            <Text style={[
+                              styles.seatText,
+                              isSelected && styles.seatTextSelected,
+                              !seat.is_available && styles.seatTextOccupied,
+                            ]}>
+                              {seat.seat_number}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  );
+                })
+              )}
+            </View>
+
+            {/* Selected Seats Info */}
+            <View style={styles.selectedSeatsInfo}>
+              <Text style={styles.selectedSeatsLabel}>Poltronas da volta selecionadas</Text>
+              <Text style={styles.selectedSeatsText}>
+                {selectedReturnSeats.map(s => s.seat_number).join(', ') || 'Nenhuma poltrona selecionada'}
+              </Text>
+            </View>
+          </View>
+        </View>
+      )}
     </ScrollView>
   );
 
@@ -534,296 +841,159 @@ export default function BookingScreen() {
     </ScrollView>
   );
 
-  // Show loading state
-  if (loading) {
-    return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#DC2626" />
-        <Text style={styles.loadingText}>Carregando detalhes da viagem...</Text>
-      </View>
-    );
-  }
-
-  // Show error state
-  if (error) {
-    return (
-      <View style={styles.errorContainer}>
-        <Ionicons name="alert-circle" size={48} color="#DC2626" />
-        <Text style={styles.errorText}>{error}</Text>
-        <TouchableOpacity style={styles.retryButton} onPress={fetchRouteDetails}>
-          <Text style={styles.retryButtonText}>Tentar Novamente</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
-
   const renderPayment = () => (
-    <ScrollView
-      style={styles.stepContent}
-      showsVerticalScrollIndicator={false}
-      keyboardShouldPersistTaps="handled"
-      contentInsetAdjustmentBehavior="automatic"
-      contentInset={{ bottom: insets.bottom }}
-      contentContainerStyle={{ paddingBottom: 24 }}
-    >
+    <ScrollView style={styles.stepContent} showsVerticalScrollIndicator={false}>
       <Text style={styles.stepTitle}>Pagamento</Text>
+      <Text style={styles.stepSubtitle}>Escolha a forma de pagamento</Text>
+
+      <Text style={styles.paymentMethodTitle}>Método de pagamento</Text>
+      {[{ key: 'credit', label: 'Cartão de Crédito' }, { key: 'debit', label: 'Cartão de Débito' }, { key: 'pix', label: 'Pix' }].map((method) => (
+        <TouchableOpacity
+          key={method.key}
+          style={[styles.paymentOption, paymentMethod === method.key && styles.paymentOptionActive]}
+          onPress={() => setPaymentMethod(method.key as any)}
+        >
+          <Ionicons name={paymentMethod === method.key ? 'checkmark-circle' : 'ellipse-outline'} size={20} color={paymentMethod === method.key ? '#DC2626' : '#6B7280'} />
+          <Text style={[styles.paymentOptionText, paymentMethod === method.key && styles.paymentOptionTextActive]}>{method.label}</Text>
+        </TouchableOpacity>
+      ))}
       
-      {/* Order Summary */}
+      {paymentMethod !== 'pix' && (
+        <View style={{ marginTop: 16 }}>
+          <Text style={styles.paymentMethodTitle}>Dados do cartão</Text>
+          <View style={styles.formGroup}>
+            <Text style={styles.label}>Número do cartão *</Text>
+            <TextInput
+              style={styles.input}
+              value={cardData.number}
+              onChangeText={(text) => setCardData({ ...cardData, number: mask(text, '9999 9999 9999 9999') })}
+              placeholder="1234 5678 9012 3456"
+              keyboardType="numeric"
+              maxLength={19}
+            />
+          </View>
+          <View style={styles.formGroup}>
+            <Text style={styles.label}>Nome no cartão *</Text>
+            <TextInput
+              style={styles.input}
+              value={cardData.name}
+              onChangeText={(text) => setCardData({ ...cardData, name: text })}
+              placeholder="JOAO SILVA"
+              autoCapitalize="characters"
+            />
+          </View>
+          <View style={{ flexDirection: 'row' }}>
+            <View style={[styles.formGroup, { flex: 1, marginRight: 12 }] }>
+              <Text style={styles.label}>Validade (MM/AA) *</Text>
+              <TextInput
+                style={styles.input}
+                value={cardData.expiry}
+                onChangeText={(text) => setCardData({ ...cardData, expiry: mask(text, '99/99') })}
+                placeholder="12/34"
+                keyboardType="numeric"
+                maxLength={5}
+              />
+            </View>
+            <View style={[styles.formGroup, { width: 100 }] }>
+              <Text style={styles.label}>CVV *</Text>
+              <TextInput
+                style={styles.input}
+                value={cardData.cvv}
+                onChangeText={(text) => setCardData({ ...cardData, cvv: mask(text, '9999') })}
+                placeholder="123"
+                keyboardType="numeric"
+                maxLength={4}
+              />
+            </View>
+          </View>
+        </View>
+      )}
+
+      {/* Cupom acima do resumo do pedido */}
+      <View style={styles.couponCard}>
+        <Text style={styles.couponTitle}>Cupom de desconto</Text>
+        <View style={styles.couponRow}>
+          <TextInput
+            style={styles.couponInput}
+            value={couponCode}
+            onChangeText={setCouponCode}
+            placeholder="Digite seu cupom"
+            autoCapitalize="characters"
+          />
+          {couponApplied ? (
+            <TouchableOpacity style={styles.couponRemoveButton} onPress={removeCoupon}>
+              <Text style={styles.couponRemoveText}>Remover</Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity style={styles.couponApplyButton} onPress={applyCoupon}>
+              <Text style={styles.couponApplyText}>Aplicar</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+        {couponError ? (
+          <Text style={styles.couponError}>{couponError}</Text>
+        ) : null}
+        {couponApplied ? (
+          <Text style={styles.couponSuccess}>Cupom aplicado: - {formatDiscount(discountAmount, appliedCoupon)}</Text>
+        ) : null}
+      </View>
+
       <View style={styles.orderSummary}>
-        <Text style={styles.summaryTitle}>Resumo do Pedido</Text>
-        
+        <Text style={styles.summaryTitle}>Resumo do pedido</Text>
         <View style={styles.summaryRow}>
           <Text style={styles.summaryLabel}>Rota</Text>
-          <Text style={styles.summaryValue}>
-            {routeDetails 
-              ? `${routeDetails.origin || 'Origem'} → ${routeDetails.destination || 'Destino'}` 
-              : `${from || 'Origem'} → ${to || 'Destino'}`
-            }
-          </Text>
+          <Text style={styles.summaryValue}>{from} → {to}</Text>
         </View>
-        
         <View style={styles.summaryRow}>
           <Text style={styles.summaryLabel}>Data</Text>
-          <Text style={styles.summaryValue}>
-            {(() => {
-              // Primeiro tenta usar o parâmetro date que vem da tela de resultados
-              if (date) {
-                try {
-                  // Se date já está no formato dd/MM/yyyy, usa diretamente
-                  if (typeof date === 'string' && date.includes('/')) {
-                    return date;
-                  }
-                  // Se date está em formato ISO, converte
-                  const parsedDate = parseISO(date as string);
-                  if (!isNaN(parsedDate.getTime())) {
-                    return format(parsedDate, 'dd/MM/yyyy');
-                  }
-                } catch (error) {
-                  console.log('🗓️ DEBUG: Error parsing date param:', error);
-                }
-              }
-              
-              // Fallback para routeDetails se date não funcionar
-              if (routeDetails && routeDetails.departure) {
-                try {
-                  const parsedDate = parseISO(routeDetails.departure);
-                  if (!isNaN(parsedDate.getTime())) {
-                    return format(parsedDate, 'dd/MM/yyyy');
-                  }
-                } catch (error) {
-                  console.log('🗓️ DEBUG: Error parsing routeDetails date:', error);
-                }
-              }
-              
-              return 'Data não informada';
-            })()}
-          </Text>
+          <Text style={styles.summaryValue}>{formatDateSafe(date as string)}</Text>
         </View>
-        
-        <View style={styles.summaryRow}>
-          <Text style={styles.summaryLabel}>Horário</Text>
-          <Text style={styles.summaryValue}>
-            {routeDetails 
-              ? (() => {
-                  try {
-                    const departureDate = parseISO(routeDetails.departure);
-                    const arrivalDate = parseISO(routeDetails.arrival);
-                    if (isNaN(departureDate.getTime()) || isNaN(arrivalDate.getTime())) {
-                      return 'Horário inválido';
-                    }
-                    return `${format(departureDate, 'HH:mm')} - ${format(arrivalDate, 'HH:mm')}`;
-                  } catch {
-                    return 'Horário inválido';
-                  }
-                })()
-              : `${departureTime || '--:--'} - ${arrivalTime || '--:--'}`
-            }
-          </Text>
-        </View>
-        
-        <View style={styles.summaryRow}>
-          <Text style={styles.summaryLabel}>Empresa</Text>
-          <Text style={styles.summaryValue}>
-            {routeDetails ? (routeDetails.bus_company || 'Empresa não informada') : (companyName as string) || 'Empresa não informada'}
-          </Text>
-        </View>
-        
         <View style={styles.summaryRow}>
           <Text style={styles.summaryLabel}>Passageiros</Text>
-          <Text style={styles.summaryValue}>
-            {passengerCount ? `${passengerCount} passageiro${parseInt(passengerCount as string) > 1 ? 's' : ''}` : '1 passageiro'}
-          </Text>
+          <Text style={styles.summaryValue}>{passengerCount}</Text>
         </View>
-        
-        <View style={styles.summaryRow}>
-          <Text style={styles.summaryLabel}>Assentos</Text>
-          <Text style={styles.summaryValue}>
-            {(() => {
-              if (selectedSeats && Array.isArray(selectedSeats) && selectedSeats.length > 0) {
-                const seatNumbers = selectedSeats
-                  .map(seat => seat?.seat_number)
-                  .filter(num => num !== undefined && num !== null)
-                  .sort();
-                
-                return seatNumbers.length > 0 ? seatNumbers.join(', ') : 'Nenhum assento selecionado';
-              }
-              return 'Nenhum assento selecionado';
-            })()}
-          </Text>
-        </View>
-        
-        <View style={[styles.summaryRow, styles.summaryTotal]}>
+        <View style={styles.summaryTotal}>
           <Text style={styles.summaryTotalLabel}>Total</Text>
-          <Text style={styles.summaryTotalValue}>
-            R$ {(() => {
-              const basePrice = routeDetails ? routeDetails.price : (price ? parseFloat(price as string) : 0);
-              const passengers = passengerCount ? parseInt(passengerCount as string) : 1;
-              const total = basePrice * passengers;
-              return isNaN(total) ? '0,00' : total.toFixed(2).replace('.', ',');
-            })()}
-          </Text>
+          <Text style={styles.summaryTotalValue}>{(() => { const passengersCountNum = parseInt(passengerCount as string) || 1; const idaPrice = toNumber(routeDetails?.price ?? parseFloat(price as string)); const isRoundTrip = (tripType as string) === 'round-trip' && !!returnTripId; const voltaPrice = isRoundTrip ? toNumber(returnRouteDetails?.price ?? idaPrice) : 0; const baseTotal = isRoundTrip ? ((idaPrice + voltaPrice) * passengersCountNum) : (idaPrice * passengersCountNum); const finalTotal = Math.max(0, baseTotal - (Number.isFinite(discountAmount) ? discountAmount : 0)); return formatCurrencyBRL(finalTotal); })()}</Text>
         </View>
+        {couponApplied ? (
+          <View style={styles.summaryRow}>
+            <Text style={styles.summaryLabel}>Cupom</Text>
+            <Text style={[styles.summaryValue, { color: '#10B981' }]}>- {formatDiscount(discountAmount, appliedCoupon)}</Text>
+          </View>
+        ) : null}
       </View>
-
-      {/* Payment Methods */}
-      <Text style={styles.paymentMethodTitle}>Forma de Pagamento</Text>
-      
-      <TouchableOpacity
-        style={[styles.paymentOption, paymentMethod === 'credit' && styles.paymentOptionActive]}
-        onPress={() => setPaymentMethod('credit')}
-      >
-        <Ionicons name="card" size={24} color={paymentMethod === 'credit' ? '#DC2626' : '#6B7280'} />
-        <Text style={[styles.paymentOptionText, paymentMethod === 'credit' && styles.paymentOptionTextActive]}>
-          Cartão de Crédito
-        </Text>
-      </TouchableOpacity>
-      
-      <TouchableOpacity
-        style={[styles.paymentOption, paymentMethod === 'debit' && styles.paymentOptionActive]}
-        onPress={() => setPaymentMethod('debit')}
-      >
-        <Ionicons name="card-outline" size={24} color={paymentMethod === 'debit' ? '#DC2626' : '#6B7280'} />
-        <Text style={[styles.paymentOptionText, paymentMethod === 'debit' && styles.paymentOptionTextActive]}>
-          Cartão de Débito
-        </Text>
-      </TouchableOpacity>
-      
-      <TouchableOpacity
-        style={[styles.paymentOption, paymentMethod === 'pix' && styles.paymentOptionActive]}
-        onPress={() => setPaymentMethod('pix')}
-      >
-        <Ionicons name="qr-code" size={24} color={paymentMethod === 'pix' ? '#DC2626' : '#6B7280'} />
-        <Text style={[styles.paymentOptionText, paymentMethod === 'pix' && styles.paymentOptionTextActive]}>
-          PIX
-        </Text>
-      </TouchableOpacity>
-
-      {/* Payment Form */}
-      <>
-        {/* Card Form */}
-        {paymentMethod !== 'pix' && (
-          <View style={styles.cardForm}>
-            <View style={styles.formGroup}>
-              <Text style={styles.label}>Número do Cartão *</Text>
-              <TextInput
-                style={styles.input}
-                value={cardData.number}
-                onChangeText={(text) => setCardData({ ...cardData, number: text })}
-                placeholder="1234 5678 9012 3456"
-                keyboardType="numeric"
-              />
-            </View>
-            
-            <View style={styles.formGroup}>
-              <Text style={styles.label}>Nome no Cartão *</Text>
-              <TextInput
-                style={styles.input}
-                value={cardData.name}
-                onChangeText={(text) => setCardData({ ...cardData, name: text })}
-                placeholder="JOÃO SILVA"
-                autoCapitalize="characters"
-              />
-            </View>
-            
-            <View style={styles.formRow}>
-              <View style={[styles.formGroup, { flex: 1, marginRight: 8 }]}>
-                <Text style={styles.label}>Validade *</Text>
-                <TextInput
-                  style={styles.input}
-                  value={cardData.expiry}
-                  onChangeText={(text) => {
-                    const maskedExpiry = mask(text, '99/99');
-                    setCardData({ ...cardData, expiry: maskedExpiry });
-                  }}
-                  placeholder="MM/AA"
-                  keyboardType="numeric"
-                />
-              </View>
-              
-              <View style={[styles.formGroup, { flex: 1, marginLeft: 8 }]}>
-                <Text style={styles.label}>CVV *</Text>
-                <TextInput
-                  style={styles.input}
-                  value={cardData.cvv}
-                  onChangeText={(text) => setCardData({ ...cardData, cvv: text })}
-                  placeholder="123"
-                  keyboardType="numeric"
-                  secureTextEntry
-                />
-              </View>
-            </View>
-          </View>
-        )}
-
-        {/* PIX Instructions */}
-        {paymentMethod === 'pix' && (
-          <View style={styles.pixInstructions}>
-            <Ionicons name="information-circle" size={24} color="#3B82F6" />
-            <Text style={styles.pixText}>
-              Ao confirmar a reserva, você receberá um QR Code PIX para pagamento.
-            </Text>
-          </View>
-        )}
-       </>
-     </ScrollView>
+    </ScrollView>
   );
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-    >
-      {/* Header */}
-      <LinearGradient colors={['#DC2626', '#B91C1C']} style={styles.header}>
-        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-          <Ionicons name="arrow-back" size={24} color="#FFFFFF" />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>
-          {routeDetails ? 'Finalizar Reserva' : 'Finalizar Reserva'}
-        </Text>
-        <View style={{ width: 40 }} />
+    <View style={styles.container}>
+      <LinearGradient colors={["#DC2626", "#B91C1C"]} style={styles.header}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+          <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+            <Ionicons name="arrow-back" size={24} color="#FFFFFF" />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Finalizar agendamento</Text>
+          <View style={{ width: 24 }} />
+        </View>
       </LinearGradient>
 
-      {/* Progress Steps */}
+      {/* Progress steps */}
       <View style={styles.progressContainer}>
         <View style={styles.progressStep}>
           <View style={[styles.progressCircle, currentStep >= 1 && styles.progressCircleActive]}>
             <Text style={[styles.progressNumber, currentStep >= 1 && styles.progressNumberActive]}>1</Text>
           </View>
-          <Text style={styles.progressLabel}>Assentos</Text>
+          <Text style={styles.progressLabel}>Poltronas</Text>
         </View>
-
         <View style={[styles.progressLine, currentStep >= 2 && styles.progressLineActive]} />
-
         <View style={styles.progressStep}>
           <View style={[styles.progressCircle, currentStep >= 2 && styles.progressCircleActive]}>
             <Text style={[styles.progressNumber, currentStep >= 2 && styles.progressNumberActive]}>2</Text>
           </View>
           <Text style={styles.progressLabel}>Passageiros</Text>
         </View>
-
         <View style={[styles.progressLine, currentStep >= 3 && styles.progressLineActive]} />
-
         <View style={styles.progressStep}>
           <View style={[styles.progressCircle, currentStep >= 3 && styles.progressCircleActive]}>
             <Text style={[styles.progressNumber, currentStep >= 3 && styles.progressNumberActive]}>3</Text>
@@ -832,44 +1002,26 @@ export default function BookingScreen() {
         </View>
       </View>
 
-      {/* Step Content */}
-      <>
+      {/* Steps content */}
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         {currentStep === 1 && renderSeatSelection()}
         {currentStep === 2 && renderPassengerForm()}
         {currentStep === 3 && renderPayment()}
-      </>
+      </KeyboardAvoidingView>
 
-      {/* Bottom Actions */}
-      <View style={[styles.bottomActions, { paddingBottom: 20 + insets.bottom }]}>
+      {/* Bottom actions */}
+      <SafeAreaView edges={['bottom']} style={styles.bottomActions}>
         {currentStep > 1 && (
-          <TouchableOpacity
-            style={styles.backStepButton}
-            onPress={() => setCurrentStep(currentStep - 1)}
-            disabled={loading}
-          >
+          <TouchableOpacity style={styles.backStepButton} onPress={() => setCurrentStep(currentStep - 1)}>
             <Ionicons name="arrow-back" size={20} color="#6B7280" />
-            <Text style={styles.backStepText}>Voltar</Text>
+            <Text style={styles.backStepText}>Voltar etapa</Text>
           </TouchableOpacity>
         )}
-
-        <TouchableOpacity
-          style={[styles.nextButton, currentStep === 1 && styles.nextButtonFull]}
-          onPress={handleNextStep}
-          disabled={loading}
-        >
-          {loading && currentStep === 3 ? (
-            <ActivityIndicator color="#FFFFFF" size="small" />
-          ) : (
-            <>
-              <Text style={styles.nextButtonText}>
-                {currentStep === 3 ? 'Confirmar Reserva' : 'Continuar'}
-              </Text>
-              <Ionicons name="arrow-forward" size={20} color="#FFFFFF" />
-            </>
-          )}
+        <TouchableOpacity style={[styles.nextButton, currentStep === 1 && styles.nextButtonFull]} onPress={handleNextStep}>
+          <Text style={styles.nextButtonText}>{currentStep < 3 ? 'Continuar' : 'Confirmar reserva'}</Text>
         </TouchableOpacity>
-      </View>
-    </KeyboardAvoidingView>
+      </SafeAreaView>
+    </View>
   );
 }
 
@@ -1166,6 +1318,73 @@ const styles = StyleSheet.create({
     color: '#DC2626',
     fontWeight: '600',
   },
+  // Cupom - estilos mais visíveis
+  couponCard: {
+    backgroundColor: '#FFF5F5',
+    borderWidth: 2,
+    borderColor: '#DC2626',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+  },
+  couponTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#B91C1C',
+    marginBottom: 12,
+  },
+  couponRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  couponInput: {
+    flex: 1,
+    borderWidth: 2,
+    borderColor: '#DC2626',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    fontSize: 16,
+    color: '#1F2937',
+    backgroundColor: '#FFFFFF',
+  },
+  couponApplyButton: {
+    backgroundColor: '#DC2626',
+    borderRadius: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  couponApplyText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  couponRemoveButton: {
+    borderWidth: 2,
+    borderColor: '#DC2626',
+    borderRadius: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: '#FFFFFF',
+  },
+  couponRemoveText: {
+    color: '#DC2626',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  couponError: {
+    marginTop: 10,
+    color: '#DC2626',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  couponSuccess: {
+    marginTop: 10,
+    color: '#10B981',
+    fontSize: 14,
+    fontWeight: '600',
+  },
   cardForm: {
     backgroundColor: '#FFFFFF',
     borderRadius: 12,
@@ -1263,3 +1482,15 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
 });
+
+// Formatação monetária consistente (pt-BR)
+ const formatCurrencyBRL = (value?: number) => {
+   try {
+     const base = typeof value === 'number' ? value : parseFloat(String(value));
+     const v = Number.isFinite(base) ? base : 0;
+     return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(v);
+   } catch {
+     const v = typeof value === 'number' && Number.isFinite(value) ? value : 0;
+     return `R$ ${v.toFixed(2)}`;
+   }
+ };
